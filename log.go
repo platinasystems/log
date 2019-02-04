@@ -58,10 +58,22 @@ func (p *RateLimited) Close() error {
 	return nil
 }
 
-var example = false
-var Writer io.Writer
-var mutex sync.Mutex
-var earlyBufs []*bytes.Buffer
+type teeT struct {
+	sync.Mutex
+	w io.Writer
+
+	exclusive bool
+}
+
+type earlyT struct {
+	sync.Mutex
+	buf *bytes.Buffer
+}
+
+var (
+	tee   teeT
+	early = earlyT{buf: &bytes.Buffer{}}
+)
 
 var PriorityByName = map[string]syslog.Priority{
 	"emerg": syslog.LOG_EMERG,
@@ -154,6 +166,9 @@ func NewRateLimited(n uint32, d time.Duration) *RateLimited {
 	return rl
 }
 
+// Tee logged lines to Writer
+func Tee(w io.Writer) { tee.w = w }
+
 // log lines from the given reader until EOF or error.
 func LinesFrom(rc io.ReadCloser, id, priority string) {
 	defer rc.Close()
@@ -170,7 +185,7 @@ func LinesFrom(rc io.ReadCloser, id, priority string) {
 }
 
 // The default level is: Debug, User. Upto the first two arguments may change
-// this by name; for example:
+// this by name; e.g.
 //
 //	Print("daemon", ...)
 //	Print("daemon", "err", ...)
@@ -250,50 +265,60 @@ func logArgs(args ...interface{}) (pri, fac syslog.Priority, a []interface{}) {
 }
 
 func log(pri syslog.Priority, id string, args ...interface{}) {
-	mutex.Lock()
-	defer mutex.Unlock()
-
-	msg := strings.Split(fmt.Sprint(args...), "\n")
-
-	if example {
-		for _, s := range msg {
-			fmt.Printf("<%d>%s: %s\n", pri, id, s)
+	lines := strings.Split(fmt.Sprint(args...), "\n")
+	if tee.w != nil {
+		tee.log(pri, id, lines)
+		if tee.exclusive {
+			return
 		}
-	} else if Writer != nil {
-		for _, s := range msg {
-			fmt.Fprintf(Writer, "<%d>%s: %s\n", pri, id, s)
-		}
-	} else if _, err := os.Stat(DevLog); err == nil {
+	}
+	if _, err := os.Stat(DevLog); err == nil {
 		conn, err := net.Dial("unixgram", DevLog)
 		if err != nil {
 			// FIXME how to log a log error?
 			return
 		}
 		defer conn.Close()
-		for _, s := range msg {
+		for _, s := range lines {
 			fmt.Fprintf(conn, "<%d>%s %s: %s\n",
 				pri, time.Now().Format(time.Stamp),
 				id, s)
 		}
-	} else if kmsg, err := os.OpenFile(DevKmsg, os.O_RDWR, 0644); err == nil {
-		defer kmsg.Close()
-		if len(earlyBufs) > 0 {
-			for _, buf := range earlyBufs {
-				kmsg.Write(buf.Bytes())
-				buf.Reset()
-			}
-			earlyBufs = earlyBufs[:0]
-		}
-		for _, s := range msg {
-			fmt.Fprintf(kmsg, "<%d>%s: %s\n", pri, id, s)
+	} else if k, err := os.OpenFile(DevKmsg, os.O_RDWR, 0644); err == nil {
+		defer k.Close()
+		early.flush(k)
+		for _, s := range lines {
+			fmt.Fprintf(k, "<%d>%s: %s\n", pri, id, s)
 		}
 	} else if os.IsNotExist(err) {
-		buf := new(bytes.Buffer)
-		for _, s := range msg {
-			fmt.Fprintf(buf, "<%d>%s: %s\n", pri, id, s)
-		}
-		earlyBufs = append(earlyBufs, buf)
+		early.log(pri, id, lines)
 	}
+}
+
+func (p *teeT) log(pri syslog.Priority, id string, lines []string) {
+	p.Lock()
+	defer p.Unlock()
+	for _, s := range lines {
+		fmt.Fprintf(p.w, "<%d>%s: %s\n", pri, id, s)
+	}
+}
+
+func (p *earlyT) log(pri syslog.Priority, id string, lines []string) {
+	p.Lock()
+	defer p.Unlock()
+	for _, s := range lines {
+		fmt.Fprintf(p.buf, "<%d>%s: %s\n", pri, id, s)
+	}
+}
+
+func (p *earlyT) flush(w io.Writer) {
+	p.Lock()
+	defer p.Unlock()
+	if p.buf.Len() == 0 {
+		return
+	}
+	w.Write(p.buf.Bytes())
+	p.buf.Reset()
 }
 
 func (p *Kmsg) IsKern() bool {
