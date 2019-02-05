@@ -229,7 +229,11 @@ func id() string {
 		if err == nil {
 			prog = filepath.Base(s)
 			if s != os.Args[0] {
-				prog += "." + os.Args[0]
+				if strings.HasPrefix(os.Args[0], prog) {
+					prog = os.Args[0]
+				} else {
+					prog += "." + os.Args[0]
+				}
 			}
 		} else {
 			prog = filepath.Base(os.Args[0])
