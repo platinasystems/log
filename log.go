@@ -178,9 +178,7 @@ func LinesFrom(rc io.ReadCloser, id, priority string) {
 	}
 	scan := bufio.NewScanner(rc)
 	for scan.Scan() {
-		s := scan.Text()
-		s = strings.Replace(s, "\t", "        ", -1)
-		log(pri|syslog.LOG_DAEMON, id, s)
+		log(pri|syslog.LOG_DAEMON, id, scan.Text())
 	}
 }
 
